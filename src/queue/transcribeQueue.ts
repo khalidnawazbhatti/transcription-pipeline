@@ -3,7 +3,7 @@ import { Queue } from 'bullmq';
 export interface TranscribeJobData {
   jobId: string;
   storedPath: string;
-  language: string | null;
+  language: string; // ISO 639-1 code, defaults to 'en'
 }
 
 export const transcribeQueue = new Queue<TranscribeJobData>('transcribe', {

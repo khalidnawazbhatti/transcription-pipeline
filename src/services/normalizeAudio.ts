@@ -2,6 +2,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 import path from 'path';
 import fs from 'fs';
+import logger from '../logger.js';
 
 // Use the bundled static binary so no system ffmpeg install is required
 ffmpeg.setFfmpegPath(ffmpegStatic as unknown as string);
@@ -33,6 +34,9 @@ export function normalizeToWav(inputPath: string, outputPath: string): Promise<v
  * Split a WAV file into fixed-length chunks with overlap.
  * 30 s windows with 1 s overlap keeps memory bounded for arbitrarily long
  * files and gives Whisper enough context at chunk boundaries.
+ * 
+ * Strategy: Extract 30s chunks sequentially, stopping when ffmpeg reports
+ * the input is exhausted (instead of pre-computing duration with ffprobe).
  */
 export async function chunkWav(
   wavPath: string,
@@ -40,49 +44,71 @@ export async function chunkWav(
   chunkSeconds = 30,
   overlapSeconds = 1,
 ): Promise<AudioChunk[]> {
-  const duration = await getAudioDuration(wavPath);
+  logger.info('chunkWav starting', { wavPath, chunkDir, chunkSeconds, overlapSeconds });
   fs.mkdirSync(chunkDir, { recursive: true });
 
   const chunks: AudioChunk[] = [];
   const step = chunkSeconds - overlapSeconds;
+  let start = 0;
 
-  for (let start = 0; start < duration; start += step) {
-    const end = Math.min(start + chunkSeconds, duration);
+  // A WAV file with no audio is just a 44-byte header. We need at least
+  // ~4800 bytes (0.15s of 16kHz mono PCM) to be worth transcribing.
+  const MIN_AUDIO_BYTES = 4800;
+
+  while (true) {
     const index = chunks.length;
     const chunkPath = path.join(chunkDir, `chunk-${index}.wav`);
+    logger.info('Extracting chunk', { index, start, chunkSeconds });
 
-    await extractSegment(wavPath, chunkPath, start, end - start);
-    chunks.push({ path: chunkPath, startOffset: start });
+    try {
+      await extractSegmentWithTimeout(wavPath, chunkPath, start, chunkSeconds);
 
-    if (end >= duration) break;
+      const size = fs.existsSync(chunkPath) ? fs.statSync(chunkPath).size : 0;
+      if (size < MIN_AUDIO_BYTES) {
+        // Past EOF — the extracted file is empty or near-empty; stop here
+        fs.rmSync(chunkPath, { force: true });
+        logger.info('Chunk empty (EOF reached)', { index, start, size });
+        break;
+      }
+
+      chunks.push({ path: chunkPath, startOffset: start });
+      logger.info('Chunk extracted', { index, start, chunkPath, size });
+      start += step;
+    } catch (err) {
+      logger.info('Chunk extraction failed (EOF)', { index, start, error: err instanceof Error ? err.message : String(err) });
+      break;
+    }
   }
 
+  logger.info('chunkWav complete', { totalChunks: chunks.length });
   return chunks;
 }
 
-function getAudioDuration(filePath: string): Promise<number> {
-  return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (err, metadata) => {
-      if (err) return reject(err);
-      resolve(metadata.format.duration ?? 0);
-    });
-  });
-}
-
-function extractSegment(
+function extractSegmentWithTimeout(
   src: string,
   dest: string,
   startSeconds: number,
   durationSeconds: number,
+  timeoutMs = 30000,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`FFmpeg extraction timeout after ${timeoutMs}ms (likely EOF)`));
+    }, timeoutMs);
+
     ffmpeg(src)
       .setStartTime(startSeconds)
       .setDuration(durationSeconds)
       .audioCodec('pcm_s16le')
       .format('wav')
-      .on('error', reject)
-      .on('end', () => resolve())
+      .on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      })
+      .on('end', () => {
+        clearTimeout(timer);
+        resolve();
+      })
       .save(dest);
   });
 }

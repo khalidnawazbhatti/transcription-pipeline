@@ -48,7 +48,7 @@ router.post('/', upload.single('audio'), async (req: Request, res: Response) => 
   }
 
   const jobId = uuidv4();
-  const language = typeof req.body['language'] === 'string' ? req.body['language'] : null;
+  const language = typeof req.body['language'] === 'string' && req.body['language'].trim() !== '' ? req.body['language'].trim() : 'en';
 
   await prisma.job.create({
     data: {
