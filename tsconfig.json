@@ -16,8 +16,5 @@
     "skipLibCheck": true
   },
   "include": ["src/**/*", "generated/**/*"],
-  "exclude": ["node_modules", "dist"],
-  "ts-node": {
-    "esm": true
-  }
+  "exclude": ["node_modules", "dist"]
 }
