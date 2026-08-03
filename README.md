@@ -196,10 +196,15 @@ Response on failure:
 ## Setup
 
 ### Prerequisites
-- Node.js 18+
-- Docker (for Redis)
 
-### Install
+- Node.js 18+
+- Docker (required for Redis in both methods; required for the full Docker method)
+
+---
+
+### Option A — Node.js (development)
+
+**1. Clone and install**
 
 ```bash
 git clone <repo-url>
@@ -207,35 +212,69 @@ cd transcription-pipeline
 npm install --legacy-peer-deps
 ```
 
-### Configure
+**2. Configure**
 
 ```bash
 cp .env.example .env
-# .env defaults work out of the box — no changes needed for local dev
+# No changes needed — defaults work out of the box
 ```
 
-### Database
+**3. Set up the database**
 
 ```bash
 npx prisma migrate dev
 ```
 
-### Start Redis
+**4. Start Redis**
 
 ```bash
 docker compose up -d redis
 ```
 
-### Run (development)
+**5. Start the server**
 
 ```bash
 npx tsx src/server.ts
 ```
 
-Server starts at `http://localhost:3000`  
-Swagger UI at `http://localhost:3000/docs`
+Server: `http://localhost:3000`  
+Swagger: `http://localhost:3000/docs`
 
-On first upload, Whisper (`Xenova/whisper-base`, ~74 MB) downloads and caches in `~/.cache/huggingface/`. Subsequent uploads use the cached model.
+On first upload, the Whisper model (`Xenova/whisper-base`, ~74 MB) is downloaded and cached. Subsequent uploads skip the download.
+
+---
+
+### Option B — Docker Compose (full stack)
+
+Runs Redis + the app in containers. No Node.js or local Redis install required.
+
+**1. Clone**
+
+```bash
+git clone <repo-url>
+cd transcription-pipeline
+```
+
+**2. Build and start everything**
+
+```bash
+docker compose up --build
+```
+
+This builds the app image, runs `prisma migrate deploy` inside the container, and starts both Redis and the API server.
+
+Server: `http://localhost:3000`  
+Swagger: `http://localhost:3000/docs`
+
+**3. Stop**
+
+```bash
+docker compose down
+```
+
+Audio files are persisted in `./storage/` and logs in `./logs/` on your host machine (bind-mounted volumes). The SQLite database persists in the `db-data` Docker named volume.
+
+---
 
 ### Logs
 
