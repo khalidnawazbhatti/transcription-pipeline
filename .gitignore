@@ -1,9 +1,46 @@
+# Dependencies
 node_modules
 
 /generated/prisma
 
 .env
+
+# Storage files
 storage/audio/*
 storage/transcripts/*
+
+
+
+# Build output
+dist/
+
+# Logs
 logs/*
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.local
+
+#  database 
 dev.db
+*.db
+*.db-journal
+
+# Coverage
+coverage/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary uploads (if generated at runtime)
+uploads/
