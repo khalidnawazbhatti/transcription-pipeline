@@ -25,6 +25,109 @@ GET /transcribe/:jobId
   → return job status + transcript segments + fullText when done
 ```
 
+## Workflow (Flow diagrams)
+
+### End-to-end request flow
+
+```
+Client
+  │
+  │  Upload MP3/WAV
+  ▼
+Express API
+  │
+  ▼
+Multer Upload
+  │
+  ▼
+FFmpeg
+Normalize Audio & Convert to WAV, 16kHz Mono
+  │
+  ▼
+Whisper
+  │
+  ▼
+Transcript
+  │
+  ▼
+Store in Database (Prod: audio → S3, metadata/transcript → Postgres)
+  │
+  ▼
+Return JSON
+```
+
+### Concurrent uploads
+
+```
+Express
+  │
+  ▼
+Upload  (many requests accepted concurrently, each returns jobId fast)
+  │
+  ▼
+Queue   (BullMQ / Redis — persists pending work, decouples upload from processing)
+  │
+  ▼
+Worker  (one job at a time per worker process — CPU-bound)
+  │
+  ▼
+Whisper (language = "en" by default, or caller-supplied)
+  │
+  ▼
+Transcript
+```
+
+### Long audio handling
+
+```
+Upload
+  │
+  ▼
+Save file
+  │
+  ▼
+Split into fixed windows (this repo: 30s / 1s overlap)
+  │
+  ▼
+Transcribe chunks (independently, bounded memory)
+  │
+  ▼
+Merge transcripts
+  │
+  ▼
+Adjust timestamps (shift by each chunk's start offset)
+```
+
+> Note: the diagram above is shown generically ("split every N minutes") because window size is tunable. This implementation uses **30-second** windows to match Whisper's own effective context length — see "Why 30s chunks with 1s overlap" below for the reasoning. Larger windows (e.g. 5 minutes) would need to be sub-chunked before hitting Whisper regardless, so 30s is the actual unit of work either way.
+
+### A clean production architecture (target state, not fully implemented here)
+
+```
+Audio Files
+  │
+  ▼
+Object Storage (AWS S3 / Local Storage)
+  │
+  ▼
+Whisper Transcription
+  │
+  ▼
+PostgreSQL
+  ├── Audio metadata
+  ├── Transcript
+  ├── Segments
+  └── Processing status
+  │
+  ▼
+(Optional)
+Generate Embeddings
+  │
+  ▼
+pgvector / Qdrant
+```
+
+The "generate embeddings → vector store" step is not part of this assignment's scope (no semantic search requirement), but it's the natural next layer if transcripts ever need to be searched by meaning rather than exact text — noted here as a forward-looking extension, not a current feature.
+
 ## Key design decisions
 
 ### Why SQLite + Prisma instead of Postgres
@@ -32,6 +135,8 @@ GET /transcribe/:jobId
 SQLite requires zero infrastructure — a reviewer clones the repo, runs `npx prisma migrate dev`, and it works with no Docker, no DB server, no connection string beyond a file path. That matters for a take-home assignment that someone else has to run.
 
 The trade-off: SQLite uses a single-writer lock. Concurrent write transactions can hit `SQLITE_BUSY` under load. Postgres uses MVCC and handles many concurrent writers natively. At this assignment's scale (one upload at a time in dev) that limitation is never exercised, but it's the concrete reason to migrate to Postgres before this handles real production traffic.
+
+This isn't really a SQLite-vs-Postgres capability gap so much as a "which stage of growth are you at" choice: SQLite wins on simplicity for a project this size, Postgres shines once the application actually grows (more concurrent writers, need for `jsonb` querying, multiple app instances). Prisma's type-safe client and migrations give the same clean developer experience either way, and because Prisma supports both providers with almost the same schema file, switching later is a one-line provider change plus a migration — not a rewrite. That low switching cost is exactly why it's safe to start with the simpler option.
 
 Migration path when needed: change `provider = "sqlite"` to `provider = "postgresql"` in `prisma/schema.prisma`, point `DATABASE_URL` at a Postgres connection string, and re-run `npx prisma migrate dev`. The only data-type change is `Transcript.segments` which goes from `String` (JSON stringified) to `Json` (native `jsonb`) — a one-field schema change.
 
@@ -182,10 +287,22 @@ Response on failure:
 { "jobId": "...", "status": "failed", "error": "ffmpeg exited with code 1" }
 ```
 
+## Testing
+
+No automated test suite is included in this submission. This is intentional rather than an oversight: at the current scale — a single-process demo meant to show engineering judgment on the pipeline itself — the highest-value time was spent on the pipeline's correctness (format normalization, chunk stitching, retry/failure visibility) rather than a test harness around it.
+
+Testing is the first thing I'd add before scaling this toward production, not an afterthought:
+- **Unit tests** for pure logic that's easy to get subtly wrong: chunk offset math in `normalizeAudio.ts`, segment timestamp stitching in `transcribe.ts`, and the EOF-by-file-size detection.
+- **Integration tests** for the route layer (`transcribe.ts` routes) using a short fixture audio file, asserting the full `pending → processing → done` lifecycle and the `failed` path with a corrupt/unsupported file.
+- **Worker tests** with a mocked Whisper pipeline, so retry/backoff behavior and the final-attempt `status: failed` write can be verified without needing a real model load in CI.
+
+In short: tests were deprioritized for this assignment's scope, but are treated as a required step — not optional polish — before any production rollout, same as the Postgres migration and S3 storage noted below.
+
 ## What I'd change for production
 
 | Concern | Current | Production path |
 |---|---|---|
+| Testing | None | Unit + integration test suite (see Testing section above) — first thing added before scaling |
 | Database | SQLite (single-writer lock) | Postgres — MVCC handles concurrent writes; `Transcript.segments` becomes `jsonb` |
 | Audio storage | Local disk (`storage/audio/`) | S3 or GCS — durable, shared across worker instances, no disk capacity limits |
 | Worker scaling | 1 worker, same process as HTTP server | Separate worker containers, one per CPU core, sharing Redis queue |
@@ -199,6 +316,15 @@ Response on failure:
 
 - Node.js 18+
 - Docker (required for Redis in both methods; required for the full Docker method)
+
+
+### For testing purpose sample files 
+
+- Two Sample Audio files are locate in `./storage/samples` which can be used for testing 
+
+### Postman 
+
+- Used Postman for real testing, swagger only for docs or information
 
 ---
 
@@ -237,7 +363,7 @@ docker compose up -d redis
 npx tsx src/server.ts
 ```
 
-Server: `http://localhost:3000`  
+Server: `http://localhost:3000`
 Swagger: `http://localhost:3000/docs`
 
 On first upload, the Whisper model (`Xenova/whisper-base`, ~74 MB) is downloaded and cached. Subsequent uploads skip the download.
@@ -263,7 +389,7 @@ docker compose up --build
 
 This builds the app image, runs `prisma migrate deploy` inside the container, and starts both Redis and the API server.
 
-Server: `http://localhost:3000`  
+Server: `http://localhost:3000`
 Swagger: `http://localhost:3000/docs`
 
 **3. Stop**
