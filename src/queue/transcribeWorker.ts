@@ -18,7 +18,7 @@ export const worker = new Worker<TranscribeJobData>(
       await prisma.job.update({ where: { id: jobId }, data: { status: 'processing' } });
 
       // 1. Normalize to 16 kHz mono WAV
-      const wavPath = storedPath.replace(/\.[^.]+$/, '.wav');
+      const wavPath = storedPath.replace(/\.[^.]+$/, '-normalized.wav');
       const t0 = Date.now();
       logger.info('Starting FFmpeg normalization', { jobId, storedPath, wavPath });
       await normalizeToWav(storedPath, wavPath);
